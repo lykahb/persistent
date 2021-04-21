@@ -27,6 +27,7 @@ module Database.Persist.TH
     , persistManyFileWith
       -- * Turn @EntityDef@s into types
     , mkPersist
+    , derivePersist
     , MkPersistSettings
     , mpsBackend
     , mpsGeneric
@@ -93,9 +94,12 @@ import GHC.TypeLits
 import Instances.TH.Lift ()
     -- Bring `Lift (Map k v)` instance into scope, as well as `Lift Text`
     -- instance on pre-1.2.4 versions of `text`
+import Language.Haskell.TH.Datatype
+import qualified Language.Haskell.TH.Datatype as THD
 import Language.Haskell.TH.Lib (appT, varT, conK, conT, varE, varP, conE, litT, strTyLit)
 import Language.Haskell.TH.Quote
 import Language.Haskell.TH.Syntax
+import qualified Language.Haskell.TH as TH
 import Web.PathPieces (PathPiece(..))
 import Web.HttpApiData (ToHttpApiData(..), FromHttpApiData(..))
 import qualified Data.Set as Set
@@ -231,11 +235,115 @@ embedEntityDefsMap rawEnts = (embedEntityMap, noCycleEnts)
 -- afterwards, sets references to other entities
 -- | @since 2.5.3
 parseReferences :: PersistSettings -> Text -> Q Exp
-parseReferences ps s = lift $
-    map (mkEntityDefSqlTypeExp embedEntityMap entityMap) noCycleEnts
+parseReferences ps s = lift result
   where
+    result = map (mkEntityDefSqlTypeExp embedEntityMap entityMap) noCycleEnts
     (embedEntityMap, noCycleEnts) = embedEntityDefsMap $ parse ps s
     entityMap = constructEntityMap noCycleEnts
+
+derivePersist :: MkPersistSettings -> PersistSettings -> Name -> Maybe DeriveEntityDef -> Q [Dec]
+derivePersist mps ps name ded = do
+    d <- reifyDatatype name
+    let ent = datatypeToEntityDef ps ded d
+    let EntityDefSqlTypeExp _ sqlTypeExp sqlTypeExps = mkEntityDefSqlTypeExp mempty mempty ent
+    
+    -- ent' <- [| ent { entityFields = $(lift $ FieldsSqlTypeExp (entityFields ent) sqlTypeExps)
+    --           , entityId = $(lift $ FieldSqlTypeExp (entityId ent) sqlTypeExp)
+    --           } |]
+
+    mkPersist (mps {mpsCreateDataType = False}) [ent]
+
+defaultReferenceTypeCon :: FieldType
+defaultReferenceTypeCon = FTTypeCon (Just "Data.Int") "Int64"
+
+mkAutoIdField :: PersistSettings -> EntityNameHS -> SqlType -> FieldDef
+mkAutoIdField ps entName idSqlType =
+    FieldDef
+        { fieldHaskell = FieldNameHS "Id"
+        -- this should be modeled as a Maybe
+        -- but that sucks for non-ID field
+        -- TODO: use a sumtype FieldDef | IdFieldDef
+        , fieldDB = FieldNameDB $ psIdName ps
+        , fieldType = FTTypeCon Nothing $ (`mappend` "Id") $ unEntityNameHS entName
+        , fieldSqlType = idSqlType
+        -- the primary field is actually a reference to the entity
+        , fieldReference = ForeignRef entName defaultReferenceTypeCon
+        , fieldAttrs = []
+        , fieldStrict = True
+        , fieldComments = Nothing
+        , fieldCascade = noCascade
+        , fieldGenerated = Nothing
+        }
+
+
+data DeriveFieldDef = DeriveFieldDef {
+    deriveSqlName :: Text,
+    sqlTypeOverride :: Maybe Text,
+    generatedOverride :: Maybe Text,
+    fieldCascadeOverride :: Maybe FieldCascade,
+    fieldAttrOverride :: [FieldAttr]
+}
+
+data DeriveEntityDef = DeriveEntityDef {
+    primaryId :: Maybe (Either DeriveFieldDef Text), -- unique name
+    deriveEntityDB :: Maybe Text,
+    uniques :: Maybe (Text, [Name]),
+    deriveFields :: Maybe [(Name, DeriveFieldDef)],
+    foreignKeys :: Maybe ()
+}
+
+datatypeToEntityDef :: PersistSettings -> Maybe DeriveEntityDef -> DatatypeInfo -> EntityDef
+datatypeToEntityDef ps@PersistSettings{..} ded DatatypeInfo{..} = EntityDef {
+    entityHaskell = EntityNameHS entName
+    , entityDB = EntityNameDB $ fromMaybe (psToDBName entName) (ded >>= deriveEntityDB)
+    , entityId = autoIdField
+    , entityAttrs = []
+    , entityFields = fields 
+    , entityUniques = []
+    , entityForeigns = []
+    , entityDerives = []
+    , entityExtra    = mempty
+    , entitySum = False 
+    , entityComments = Nothing
+} where
+    entName = pack $ nameBase datatypeName
+    autoIdField = mkAutoIdField ps (EntityNameHS entName) idSqlType
+    idSqlType = SqlInt64
+    fields = fieldToFieldDefs ps ded $ case datatypeCons of
+        [c] -> c
+        _ -> error $ show entName <> ": data type must have a single constructor"
+
+fieldToFieldDefs :: PersistSettings -> Maybe DeriveEntityDef -> ConstructorInfo -> [FieldDef]
+fieldToFieldDefs PersistSettings{..} ded ConstructorInfo{..} = case constructorVariant of
+    RecordConstructor names -> zipWith3 (\name -> toFieldDef name (lookupOverride name)) names constructorFields constructorStrictness
+    _ -> error "Data type must have a record constructor"
+    where
+    lookupOverride :: Name -> Maybe DeriveFieldDef
+    lookupOverride name = ded >>= deriveFields >>= lookup name
+    toFieldDef :: Name -> Maybe DeriveFieldDef -> Type -> FieldStrictness -> FieldDef
+    toFieldDef name maybeDef typ strictness = FieldDef{
+          fieldHaskell = FieldNameHS $ pack $ nameBase name
+        , fieldDB = FieldNameDB $ fromMaybe (psToDBName $ pack $ nameBase name) (maybeDef >>= sqlTypeOverride)
+        , fieldType = typeToFieldType typ
+        , fieldSqlType = SqlOther $ "SqlType unset for " `mappend` pack (show name)
+        , fieldAttrs = maybe [] fieldAttrOverride maybeDef
+        , fieldStrict = fieldStrictness strictness == THD.Strict
+        , fieldReference = NoReference
+        , fieldComments = Nothing
+        , fieldCascade = FieldCascade (maybeDef >>= fieldCascadeOverride >>= fcOnUpdate) (maybeDef >>= fieldCascadeOverride >>= fcOnDelete)
+        , fieldGenerated = maybeDef >>= generatedOverride
+        }
+
+typeToFieldType :: Type -> FieldType
+typeToFieldType = go where
+    go (ConT name) = FTTypeCon Nothing (pack $ nameBase name)
+    go (ParensT t) = go t
+    go (AppT ListT t) = FTList (go t)
+    go (AppT t1 t2) = FTApp (go t1) ( go t2)
+    go t = error $ "Cannot process type: " <> show t
+    -- convertModule Nothing = Nothing 
+    -- convertModule (Just m) | m == "GHC.Base"
+
 
 stripId :: FieldType -> Maybe Text
 stripId (FTTypeCon Nothing t) = stripSuffix "Id" t
@@ -512,6 +620,8 @@ data MkPersistSettings = MkPersistSettings
     -- Default: []
     --
     -- @since 2.8.1
+    , mpsCreateDataType :: !Bool
+    -- ^ Create data type for the entity
     }
 
 data EntityJSON = EntityJSON
@@ -537,6 +647,7 @@ mkPersistSettings backend = MkPersistSettings
         }
     , mpsGenerateLenses = False
     , mpsDeriveInstances = []
+    , mpsCreateDataType = True
     }
 
 -- | Use the 'SqlPersist' backend.
@@ -1131,9 +1242,11 @@ mkEntity entityMap mps entDef = do
             Nothing ->
                 [d|$(varP 'keyFromRecordM) = Nothing|]
 
-    dtd <- dataTypeDec mps entDef
-    return $ addSyn $
-       dtd : mconcat fkc `mappend`
+    addDtd <- if mpsCreateDataType mps
+        then (:) <$> dataTypeDec mps entDef
+        else pure id
+    return $ addSyn $ addDtd $
+        mconcat fkc `mappend`
       ([ TySynD (keyIdName entDef) [] $
             ConT ''Key `AppT` ConT name
       , instanceD instanceConstraint clazz
