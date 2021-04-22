@@ -28,6 +28,11 @@ module Database.Persist.TH
       -- * Turn @EntityDef@s into types
     , mkPersist
     , derivePersist
+    , DeriveEntityDef(..)
+    , DeriveFieldDef(..)
+    , DeriveForeignKey(..)
+    , mkDeriveEntityDef
+    , mkDeriveFieldDef
     , MkPersistSettings
     , mpsBackend
     , mpsGeneric
@@ -192,7 +197,7 @@ getFileContents = fmap decodeUtf8 . BS.readFile
 embedEntityDefs :: [EntityDef] -> [EntityDef]
 embedEntityDefs = snd . embedEntityDefsMap
 
-embedEntityDefsMap :: [EntityDef] -> (M.Map EntityNameHS EmbedEntityDef, [EntityDef])
+embedEntityDefsMap :: [EntityDef] -> (EmbedEntityMap, [EntityDef])
 embedEntityDefsMap rawEnts = (embedEntityMap, noCycleEnts)
   where
     noCycleEnts = map breakCycleEnt entsWithEmbeds
@@ -241,17 +246,15 @@ parseReferences ps s = lift result
     (embedEntityMap, noCycleEnts) = embedEntityDefsMap $ parse ps s
     entityMap = constructEntityMap noCycleEnts
 
-derivePersist :: MkPersistSettings -> PersistSettings -> Name -> Maybe DeriveEntityDef -> Q [Dec]
-derivePersist mps ps name ded = do
-    d <- reifyDatatype name
-    let ent = datatypeToEntityDef ps ded d
-    let EntityDefSqlTypeExp _ sqlTypeExp sqlTypeExps = mkEntityDefSqlTypeExp mempty mempty ent
-    
-    -- ent' <- [| ent { entityFields = $(lift $ FieldsSqlTypeExp (entityFields ent) sqlTypeExps)
-    --           , entityId = $(lift $ FieldSqlTypeExp (entityId ent) sqlTypeExp)
-    --           } |]
+-- | Include entities that are related to each other in one call
+derivePersist :: MkPersistSettings -> PersistSettings -> [DeriveEntityDef] -> Q [Dec]
+derivePersist mps ps defs = do
+    ents <- mapM (\ded -> datatypeToEntityDef ps ded <$> reifyDatatype (entityTypeName ded)) defs
+    let ents' = fixForeignKeysAll ents
+    let (embedEntityMap, noCycleEnts) = embedEntityDefsMap ents'
+    let entityMap = constructEntityMap noCycleEnts
+    mkPersist (mps {mpsCreateDataType = False, mpsFieldSqlType = getSqlTypeExp embedEntityMap entityMap}) ents'
 
-    mkPersist (mps {mpsCreateDataType = False}) [ent]
 
 defaultReferenceTypeCon :: FieldType
 defaultReferenceTypeCon = FTTypeCon (Just "Data.Int") "Int64"
@@ -277,62 +280,129 @@ mkAutoIdField ps entName idSqlType =
 
 
 data DeriveFieldDef = DeriveFieldDef {
-    deriveSqlName :: Text,
-    sqlTypeOverride :: Maybe Text,
-    generatedOverride :: Maybe Text,
-    fieldCascadeOverride :: Maybe FieldCascade,
-    fieldAttrOverride :: [FieldAttr]
+    sqlNameOverride :: Maybe Text
+    , sqlTypeOverride :: Maybe Text
+    , generatedOverride :: Maybe Text
+    , fieldCascadeOverride :: Maybe FieldCascade
+    , fieldAttrOverride :: [FieldAttr]
 }
 
 data DeriveEntityDef = DeriveEntityDef {
-    primaryId :: Maybe (Either DeriveFieldDef Text), -- unique name
-    deriveEntityDB :: Maybe Text,
-    uniques :: Maybe (Text, [Name]),
-    deriveFields :: Maybe [(Name, DeriveFieldDef)],
-    foreignKeys :: Maybe ()
+    entityTypeName :: Name
+    , primaryId :: Maybe (Either DeriveFieldDef [Name])
+    , deriveEntityDB :: Maybe Text
+    , uniques :: Maybe (Text, [Name])
+    , deriveFields :: Maybe [(Name, DeriveFieldDef)]
+    , foreignKeys :: [DeriveForeignKey]
+    -- TODO: this could be inferred from the data type. Also, you can only call entityDef if the instance is created with TH in another module
+    , relatedEntities :: [EntityDef]
 }
 
-datatypeToEntityDef :: PersistSettings -> Maybe DeriveEntityDef -> DatatypeInfo -> EntityDef
-datatypeToEntityDef ps@PersistSettings{..} ded DatatypeInfo{..} = EntityDef {
-    entityHaskell = EntityNameHS entName
-    , entityDB = EntityNameDB $ fromMaybe (psToDBName entName) (ded >>= deriveEntityDB)
-    , entityId = autoIdField
-    , entityAttrs = []
-    , entityFields = fields 
-    , entityUniques = []
-    , entityForeigns = []
-    , entityDerives = []
-    , entityExtra    = mempty
-    , entitySum = False 
-    , entityComments = Nothing
-} where
+mkDeriveEntityDef :: Name -> DeriveEntityDef
+mkDeriveEntityDef name = DeriveEntityDef {
+    entityTypeName = name
+    , primaryId = Nothing
+    , deriveEntityDB = Nothing
+    , uniques = Nothing
+    , deriveFields = Nothing
+    , foreignKeys = []
+    , relatedEntities = []
+}
+
+mkDeriveFieldDef :: DeriveFieldDef
+mkDeriveFieldDef = DeriveFieldDef
+    { sqlNameOverride = Nothing
+    , sqlTypeOverride = Nothing
+    , generatedOverride = Nothing
+    , fieldCascadeOverride = Nothing
+    , fieldAttrOverride = []
+}
+
+data DeriveForeignKey = DeriveForeignKey
+    { otherEntity :: Name
+    , constraintName :: Text
+    , ourFields :: [Name]
+    , parentFields :: Maybe [Name]
+}
+
+datatypeToEntityDef :: PersistSettings -> DeriveEntityDef -> DatatypeInfo -> UnboundEntityDef
+datatypeToEntityDef ps@PersistSettings{..} ded DatatypeInfo{..} = UnboundEntityDef foreigns ent where
+    ent = EntityDef
+        { entityHaskell = EntityNameHS entName
+        , entityDB = EntityNameDB $ fromMaybe (psToDBName entName) (deriveEntityDB ded)
+        , entityId = setComposite primaryComposite autoIdField
+        , entityAttrs = []
+        , entityFields = map snd fields 
+        , entityUniques = []
+        , entityForeigns = []
+        , entityDerives = []
+        , entityExtra    = mempty
+        , entitySum = False 
+        , entityComments = Nothing
+    }
     entName = pack $ nameBase datatypeName
     autoIdField = mkAutoIdField ps (EntityNameHS entName) idSqlType
-    idSqlType = SqlInt64
+    setComposite Nothing fd = fd
+    setComposite (Just c) fd = fd
+        { fieldReference = CompositeRef c
+        }
     fields = fieldToFieldDefs ps ded $ case datatypeCons of
         [c] -> c
         _ -> error $ show entName <> ": data type must have a single constructor"
+    primaryComposite :: Maybe CompositeDef
+    primaryComposite = flip CompositeDef [] <$> case primaryId ded of
+        Just (Right names) -> Just $ getFieldsByName names
+        _ -> Nothing
 
-fieldToFieldDefs :: PersistSettings -> Maybe DeriveEntityDef -> ConstructorInfo -> [FieldDef]
+    getFieldsByName :: [Name] -> [FieldDef]
+    getFieldsByName names = flip map names $ \name -> case lookup name fields of
+        Just field -> field
+        Nothing -> error $ "datatypeToEntityDef: entity " <> show entName <> "  does not have field " <> show name
+    idSqlType = maybe SqlInt64 (const $ SqlOther "Primary Key") primaryComposite
+    
+    foreigns = map mkForeign (foreignKeys ded)
+    
+    mkForeign :: DeriveForeignKey -> UnboundForeignDef
+    mkForeign DeriveForeignKey{..} = UnboundForeignDef fFields' [] $ ForeignDef
+        { foreignRefTableHaskell = EntityNameHS $ pack $ nameBase otherEntity
+        , foreignRefTableDBName = EntityNameDB $ psToDBName $ pack $ nameBase otherEntity
+        , foreignConstraintNameHaskell = ConstraintNameHS constraintName
+        , foreignConstraintNameDBName =
+            ConstraintNameDB $ psToDBName (entName `T.append` constraintName)
+        , foreignFieldCascade = FieldCascade
+            { fcOnDelete = Nothing
+            , fcOnUpdate = Nothing
+            }
+        , foreignFields =  []
+        , foreignAttrs = []
+        , foreignNullable = False
+        , foreignToPrimary = null parentFields
+        } where
+            -- TODO: this must match fieldHaskell of FieldDef. Annoyingly, persistent fieldHaskell does not match the record field.
+            -- This will fail if we omit affix or do anything else that causes the record name and haskelName mismatch.
+            fFields' = map (pack . nameBase) ourFields
+
+fieldToFieldDefs :: PersistSettings -> DeriveEntityDef -> ConstructorInfo -> [(Name, FieldDef)]
 fieldToFieldDefs PersistSettings{..} ded ConstructorInfo{..} = case constructorVariant of
     RecordConstructor names -> zipWith3 (\name -> toFieldDef name (lookupOverride name)) names constructorFields constructorStrictness
     _ -> error "Data type must have a record constructor"
     where
     lookupOverride :: Name -> Maybe DeriveFieldDef
-    lookupOverride name = ded >>= deriveFields >>= lookup name
-    toFieldDef :: Name -> Maybe DeriveFieldDef -> Type -> FieldStrictness -> FieldDef
-    toFieldDef name maybeDef typ strictness = FieldDef{
+    lookupOverride name = deriveFields ded >>= lookup name
+    toFieldDef :: Name -> Maybe DeriveFieldDef -> Type -> FieldStrictness -> (Name, FieldDef)
+    toFieldDef name maybeDef typ strictness = (name, FieldDef{
           fieldHaskell = FieldNameHS $ pack $ nameBase name
-        , fieldDB = FieldNameDB $ fromMaybe (psToDBName $ pack $ nameBase name) (maybeDef >>= sqlTypeOverride)
+        , fieldDB = FieldNameDB $ fromMaybe (psToDBName $ pack $ nameBase name) (maybeDef >>= sqlNameOverride)
         , fieldType = typeToFieldType typ
         , fieldSqlType = SqlOther $ "SqlType unset for " `mappend` pack (show name)
-        , fieldAttrs = maybe [] fieldAttrOverride maybeDef
+        , fieldAttrs = sqlTypeAttr maybeDef <> maybe [] fieldAttrOverride maybeDef
         , fieldStrict = fieldStrictness strictness == THD.Strict
         , fieldReference = NoReference
         , fieldComments = Nothing
         , fieldCascade = FieldCascade (maybeDef >>= fieldCascadeOverride >>= fcOnUpdate) (maybeDef >>= fieldCascadeOverride >>= fcOnDelete)
         , fieldGenerated = maybeDef >>= generatedOverride
-        }
+        })
+    sqlTypeAttr maybeDef = maybe [] (\t -> [FieldAttrSqltype t]) (maybeDef >>= sqlTypeOverride)
 
 typeToFieldType :: Type -> FieldType
 typeToFieldType = go where
@@ -484,17 +554,20 @@ setEmbedField entName allEntities field = field
 
 mkEntityDefSqlTypeExp :: EmbedEntityMap -> EntityMap -> EntityDef -> EntityDefSqlTypeExp
 mkEntityDefSqlTypeExp emEntities entityMap ent =
-    EntityDefSqlTypeExp ent (getSqlType $ entityId ent) (map getSqlType $ entityFields ent)
-  where
-    getSqlType field =
-        maybe
-            (defaultSqlTypeExp field)
-            (SqlType' . SqlOther)
-            (listToMaybe $ mapMaybe (\case {FieldAttrSqltype x -> Just x; _ -> Nothing}) $ fieldAttrs field)
+    EntityDefSqlTypeExp ent (getSqlTypeExp emEntities entityMap $ entityId ent)
+        (map (getSqlTypeExp emEntities entityMap) $ entityFields ent)
+
+getSqlTypeExp :: EmbedEntityMap -> EntityMap -> FieldDef -> SqlTypeExp
+getSqlTypeExp emEntities entityMap field =
+    maybe
+        defaultSqlTypeExp
+        (SqlType' . SqlOther)
+        (listToMaybe $ mapMaybe (\case {FieldAttrSqltype x -> Just x; _ -> Nothing}) $ fieldAttrs field)
+    where
 
     -- In the case of embedding, there won't be any datatype created yet.
     -- We just use SqlString, as the data will be serialized to JSON.
-    defaultSqlTypeExp field =
+    defaultSqlTypeExp =
         case mEmbedded emEntities ftype of
             Right _ ->
                 SqlType' SqlString
@@ -512,7 +585,7 @@ mkEntityDefSqlTypeExp emEntities entityMap ent =
                                     Nothing -> SqlTypeExp ft
                                     Just pdef ->
                                         case compositeFields pdef of
-                                            [] -> error "mkEntityDefSqlTypeExp: no composite fields"
+                                            [] -> error "getSqlTypeExp: no composite fields"
                                             [x] -> SqlTypeExp $ fieldType x
                                             _ -> SqlType' $ SqlOther "Composite Reference"
                     CompositeRef _ ->
@@ -622,6 +695,7 @@ data MkPersistSettings = MkPersistSettings
     -- @since 2.8.1
     , mpsCreateDataType :: !Bool
     -- ^ Create data type for the entity
+    , mpsFieldSqlType :: FieldDef -> SqlTypeExp
     }
 
 data EntityJSON = EntityJSON
@@ -648,6 +722,7 @@ mkPersistSettings backend = MkPersistSettings
     , mpsGenerateLenses = False
     , mpsDeriveInstances = []
     , mpsCreateDataType = True
+    , mpsFieldSqlType = SqlType' . fieldSqlType
     }
 
 -- | Use the 'SqlPersist' backend.
@@ -1837,7 +1912,7 @@ mkField mps et cd = do
                 []
                 [mkEqualP (VarT $ mkName "typ") $ maybeIdType mps cd Nothing Nothing]
                 $ NormalC name []
-    bod <- lift cd
+    bod <- lift $ FieldSqlTypeExp cd (mpsFieldSqlType mps cd)
     let cla = normalClause
                 [ConP name []]
                 bod

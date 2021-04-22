@@ -419,6 +419,9 @@ module Database.Persist.Quasi
     , upperCaseSettings
     , lowerCaseSettings
     , nullable
+    , fixForeignKeysAll
+    , UnboundEntityDef(..)
+    , UnboundForeignDef(..)
 #if TEST
     , Token (..)
     , Line' (..)

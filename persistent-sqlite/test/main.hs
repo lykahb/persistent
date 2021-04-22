@@ -199,6 +199,7 @@ main = do
 
   hspec $ do
     CompositeTest.specsWith db
+    DerivePersistTest.specsWith db
 
 
     it "issue #328" $ asIO $ runSqliteInfo (mkSqliteConnectionInfo ":memory:") $ do
