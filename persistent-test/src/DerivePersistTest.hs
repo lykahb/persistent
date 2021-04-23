@@ -2,7 +2,7 @@
 
 module DerivePersistTest where
 
-import Database.Persist.TH (mkDeleteCascade, derivePersist, persistLowerCase, DeriveEntityDef(..), DeriveFieldDef(..), DeriveForeignKey(..), mkDeriveEntityDef, mkDeriveFieldDef)
+import Database.Persist.TH (mkDeleteCascade, derivePersist, persistLowerCase, stripEntityNamePrefix, DeriveEntityDef(..), DeriveFieldDef(..), DeriveForeignKey(..), mkDeriveEntityDef, mkDeriveFieldDef)
 import Database.Persist.Quasi (lowerCaseSettings)
 import Data.Maybe (isJust)
 
@@ -13,13 +13,17 @@ data Plain = Plain {
   plainName :: String,
   plainAge :: Int
 } deriving (Eq, Show)
-derivePersist persistSettings {mpsGeneric=False, mpsFieldLabelModifier=(\_ f -> f)} lowerCaseSettings [mkDeriveEntityDef 'Plain]
+derivePersist persistSettings {mpsGeneric=False, mpsRecordFieldToHaskellName = stripEntityNamePrefix} lowerCaseSettings [
+  mkDeriveEntityDef 'Plain
+  ]
 
 data PlainPrimary = PlainPrimary {
   plainPrimaryName :: String,
-  plainRef :: PlainId
+  plainPrimaryRef :: PlainId
 } deriving (Eq, Show)
-derivePersist persistSettings {mpsGeneric=False, mpsFieldLabelModifier=(\_ f -> f)} lowerCaseSettings [mkDeriveEntityDef 'PlainPrimary]
+derivePersist persistSettings {mpsGeneric=False, mpsRecordFieldToHaskellName = stripEntityNamePrefix} lowerCaseSettings [
+  mkDeriveEntityDef 'PlainPrimary
+  ]
 
 newtype SubType = SubType {
   menuObject :: [MenuObject]
@@ -29,7 +33,7 @@ newtype MenuObject = MenuObject {
   sub :: Maybe SubType
 } deriving (Eq, Show)
 
-derivePersist persistSettings {mpsGeneric=False, mpsFieldLabelModifier=(\_ f -> f)} lowerCaseSettings [
+derivePersist persistSettings {mpsGeneric=False, mpsRecordFieldToHaskellName = stripEntityNamePrefix} lowerCaseSettings [
   mkDeriveEntityDef 'SubType,
   mkDeriveEntityDef 'MenuObject
   ]
@@ -48,7 +52,7 @@ data TestChild2 = TestChild2 {
   , testChildExtra4 :: String
 } deriving (Eq, Show)
 
-derivePersist persistSettings {mpsGeneric=False, mpsFieldLabelModifier=(\_ f -> f)} lowerCaseSettings [
+derivePersist persistSettings {mpsGeneric=False, mpsRecordFieldToHaskellName = stripEntityNamePrefix} lowerCaseSettings [
     (mkDeriveEntityDef 'TestParent2) {
       primaryId = Just $ Right ['testParentName, 'testParentName2, 'testParentAge]
     },
@@ -76,7 +80,7 @@ specsWith runDb = describe "derivePersist" $
     
     it "Creates fields" $ runDb $ do
       k <- insert p1
-      p1' <- selectFirst [PlainPlainName ==. "a"] []
+      p1' <- selectFirst [PlainName ==. "a"] []
       Just (Entity k p1) @== p1'
 
     it "Supports primary key" $ runDb $ do
