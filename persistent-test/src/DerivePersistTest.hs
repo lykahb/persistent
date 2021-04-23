@@ -13,9 +13,13 @@ data Plain = Plain {
   plainName :: String,
   plainAge :: Int
 } deriving (Eq, Show)
+
 derivePersist persistSettings {mpsGeneric=False, mpsRecordFieldToHaskellName = stripEntityNamePrefix} lowerCaseSettings [
-  mkDeriveEntityDef 'Plain
-  ]
+  (mkDeriveEntityDef 'Plain) {
+    deriveFields = [(mkDeriveFieldDef 'plainName) {
+      sqlNameOverride=Just "sql_name"
+      }]
+  }]
 
 data PlainPrimary = PlainPrimary {
   plainPrimaryName :: String,
@@ -112,5 +116,4 @@ specsWith runDb = describe "derivePersist" $
       isJust mc @== True
       let Just c11 = mc
       c1 @== c11
-      -- testChildFkparent was not created 
-      -- testChildFkparent c11 @== kp1
+      testChild2Fkparent c11 @== kp1

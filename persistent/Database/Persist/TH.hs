@@ -281,7 +281,8 @@ mkAutoIdField ps entName idSqlType =
 
 
 data DeriveFieldDef = DeriveFieldDef {
-    sqlNameOverride :: Maybe Text
+    fieldRecordName :: Name
+    , sqlNameOverride :: Maybe Text
     , sqlTypeOverride :: Maybe Text
     , generatedOverride :: Maybe Text
     , fieldCascadeOverride :: Maybe FieldCascade
@@ -293,7 +294,7 @@ data DeriveEntityDef = DeriveEntityDef {
     , primaryId :: Maybe (Either DeriveFieldDef [Name])
     , deriveEntityDB :: Maybe Text
     , uniques :: Maybe (Text, [Name])
-    , deriveFields :: Maybe [(Name, DeriveFieldDef)]
+    , deriveFields :: [DeriveFieldDef]
     , foreignKeys :: [DeriveForeignKey]
     -- TODO: this could be inferred from the data type. Also, you can only call entityDef if the instance is created with TH in another module
     , relatedEntities :: [EntityDef]
@@ -305,14 +306,15 @@ mkDeriveEntityDef name = DeriveEntityDef {
     , primaryId = Nothing
     , deriveEntityDB = Nothing
     , uniques = Nothing
-    , deriveFields = Nothing
+    , deriveFields = []
     , foreignKeys = []
     , relatedEntities = []
 }
 
-mkDeriveFieldDef :: DeriveFieldDef
-mkDeriveFieldDef = DeriveFieldDef
-    { sqlNameOverride = Nothing
+mkDeriveFieldDef :: Name -> DeriveFieldDef
+mkDeriveFieldDef name = DeriveFieldDef
+    { fieldRecordName = name
+    , sqlNameOverride = Nothing
     , sqlTypeOverride = Nothing
     , generatedOverride = Nothing
     , fieldCascadeOverride = Nothing
@@ -389,11 +391,13 @@ datatypeToEntityDef mps ps@PersistSettings{..} ded DatatypeInfo{..} = UnboundEnt
 
 fieldToFieldDefs :: MkPersistSettings -> PersistSettings -> DeriveEntityDef -> ConstructorInfo -> [(Name, FieldDef)]
 fieldToFieldDefs mps PersistSettings{..} ded ConstructorInfo{..} = case constructorVariant of
-    RecordConstructor names -> zipWith3 (\name -> toFieldDef name (lookupOverride name)) names constructorFields constructorStrictness
+    RecordConstructor names -> zipWith3 (\name -> toFieldDef name (lookupFieldOverride name)) names constructorFields constructorStrictness
     _ -> error "Data type must have a record constructor"
     where
-    lookupOverride :: Name -> Maybe DeriveFieldDef
-    lookupOverride name = deriveFields ded >>= lookup name
+    lookupFieldOverride :: Name -> Maybe DeriveFieldDef
+    lookupFieldOverride =
+        let fieldMap = M.fromList $ map (\f -> (fieldRecordName f, f)) $ deriveFields ded
+        in flip M.lookup fieldMap
 
     toFieldDef :: Name -> Maybe DeriveFieldDef -> Type -> FieldStrictness -> (Name, FieldDef)
     toFieldDef name maybeDef typ strictness = (name, FieldDef{
