@@ -17,8 +17,45 @@ extra-source-files: ChangeLog.md
 library
     exposed-modules: 
         CompositeTest
+        CustomPersistField
+        CustomPersistFieldTest
+        CustomPrimaryKeyReferenceTest
+        DataTypeTest
         DerivePersistTest
+        EmbedTest
+        EmbedOrderTest
+        EmptyEntityTest
+        EntityEmbedTest
+        EquivalentTypeTest
+        ForeignKey
+        HtmlTest
         Init
+        LargeNumberTest
+        MaxLenTest
+        MigrationColumnLengthTest
+        MigrationIdempotencyTest
+        MigrationOnlyTest
+        MigrationTest
+        MpsNoPrefixTest
+        MpsCustomPrefixTest
+        PersistentTest
+        PersistentTestModels
+        PersistentTestModelsImports
+        GeneratedColumnTestSQL
+        PersistTestPetType
+        PersistTestPetCollarType
+        PersistUniqueTest
+        PrimaryTest
+        RawSqlTest
+        ReadWriteTest
+        RenameTest
+        Recursive
+        SumTypeTest
+        TransactionLevelTest
+        TreeTest
+        UniqueTest
+        UpsertTest
+        LongIdentifierTest
 
     hs-source-dirs: src
 
