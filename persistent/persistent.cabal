@@ -40,7 +40,7 @@ library
                    , unliftio
                    , unordered-containers
                    , th-lift-instances        >= 0.1.14    && < 0.2
-                   , th-abstraction           >= 0.3
+                   , th-abstraction           >= 0.2.8
                    , vector
 
     default-extensions: FlexibleContexts
@@ -123,6 +123,7 @@ test-suite test
       , unliftio
       , silently
       , th-lift-instances
+      , th-abstraction
 
     hs-source-dirs:
         ./
